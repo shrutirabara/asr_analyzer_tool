@@ -4,72 +4,70 @@ A **vendor-neutral** method for measuring how well speech recognition is working
 in an MRCP-based IVR, straight from the MRCP server logs — before deciding what
 to improve.
 
-The parser reads the MRCP server logs and buckets every `RECOGNITION-COMPLETE`
-event by its `Completion-Cause` (RFC 6787), showing where recognition is
-succeeding, timing out, or failing. Because that signal is part of the protocol
-rather than any one product, the same analysis carries to any MRCP stack — this
-repo implements it for UniMRCP + Azure.
+It rests on one fact of the protocol: every MRCPv2 recognizer emits a
+`RECOGNITION-COMPLETE` event carrying a `Completion-Cause` (RFC 6787). Count those
+events, bucket them by cause, and you have a picture of recognition health that
+holds on any MRCP stack — whatever MRCP server or speech engine you run.
 
-**What it's for.** I built this to baseline the speech-recognition health of one
-UniMRCP → Azure IVR (over MRCP, on an Avaya platform) before deciding what to
-improve. Beyond that baseline, it's meant to be reused: the *method* (§2, §5)
-applies to any MRCP deployment, whatever server or engine you run.
+**Reference implementation (this repo):** MRCP client = an Avaya IVR, MRCP server
+= UniMRCP, speech engine = Azure Speech. Those products are named here once; the
+rest of the doc speaks in MRCP roles.
 
-**Method vs. implementation.** Sections 2 and 5 are the portable method; sections
-1 and 3 are the worked example for the stack I built it for (Avaya → UniMRCP →
-Azure), and §4 flags which limits are universal vs specific to it. The script
-itself is a *reference implementation*, not a turnkey tool — it is wired to
-UniMRCP log formats and Azure results, so reusing it on another stack means
-re-implementing the two adapters in §5, not just pointing it at new logs.
+**What it's for & how to read it.** I built this to baseline the recognition
+health of one MRCP IVR before deciding what to improve — and to be reusable on any
+MRCP stack (the method is §2 and §5). The script is a *reference implementation*,
+not a turnkey tool: reusing it elsewhere means re-implementing the two adapters in
+§5, not just pointing it at new logs.
 
 ---
 
 ## 1. The setup
 
+Several layers sit between the caller and a recognition outcome. Only the MRCP
+server's logs are analyzed.
+
 ```text
   Caller
     |  speech (and DTMF keypad)
     v
-  Avaya IVR  --keypad-->  DTMF handled by Avaya
+  IVR platform (MRCP client)  --keypad-->  DTMF handled by the platform
     |
     |  speech audio (MRCPv2)
     v
-  UniMRCP Server  <--- audio stream out / result + confidence back --->  Azure Speech
+  MRCP server  <--- audio out / result + confidence back --->  speech engine
     |
     |  writes: RECOGNITION-COMPLETE + Completion-Cause
     v
-  UniMRCP Logs
+  MRCP server logs
     |
     v
   recognition_metrics.py   (reads the logs, reports health)
 ```
 
-- **Avaya IVR** — telephony platform. Runs prompts and captures input (speech and
-  DTMF).
-- **UniMRCP server** — speaks MRCPv2, streams the caller's *speech* audio to the
-  engine, and writes the logs we analyze.
-- **Azure Speech** — the recognition engine; returns the transcript (NLSML) and a
+- **IVR platform (MRCP client)** — runs prompts, captures input (speech and DTMF),
+  and issues `RECOGNIZE` requests.
+- **MRCP server** — speaks MRCPv2, streams the caller's *speech* audio to the
+  engine, and writes the logs analyzed here.
+- **Speech engine** — the recognizer; returns the transcript and, if supported, a
   self-reported confidence.
 - **`recognition_metrics.py`** — reads the logs and reports the health metrics.
 
-The key consequence of this layout: **DTMF (keypad) is handled by Avaya, not sent
-over MRCP. Some prompts open DTMF and speech at once, so a keypad answer leaves
-the parallel speech request running with no audio** — surfacing as a no-input
-turn (see §4).
+Key consequence: **where the IVR platform collects DTMF outside MRCP (as in this
+deployment), the recognizer never sees keypad input.** Some prompts open DTMF and
+speech at once, so a keypad answer leaves the parallel speech request running with
+no audio — surfacing as a no-input turn (see §4).
 
 ---
 
 ## 2. How the analysis works
 
 The unit is the **recognition turn**: one `RECOGNIZE` → `RECOGNITION-COMPLETE`
-cycle — one moment the platform listened and got an outcome. A call has many
-turns.
+cycle — one moment the platform listened and got an outcome. A call has many turns.
 
-Count one outcome per `RECOGNITION-COMPLETE` event, reading the
-`Completion-Cause` from that event's own header, and scope to the recognizer
-resource to ignore synthesizer/recorder events. (RFC 6787 names that resource
-`speechrecog`; some servers or profiles label it differently — e.g., `azuresr`
-in our logs.)
+Count one outcome per `RECOGNITION-COMPLETE` event, reading the `Completion-Cause`
+from that event's own header, and scope to the recognizer resource to ignore
+synthesizer/recorder events. (RFC 6787 names that resource `speechrecog`; servers
+or profiles may label it differently — e.g., `azuresr` in this deployment's logs.)
 
 > **The one pitfall.** Do *not* count every line containing `Completion-Cause:`.
 > That header also rides on `STOP` and other `200 COMPLETE` responses, so raw
@@ -95,10 +93,10 @@ in our logs.)
 The bulk is 000 / 001 / 002; the rest are exceptions worth watching. (Full
 000–016 set: RFC 6787 §9.4.11.)
 
-**Confidence (secondary).** Azure's self-reported top-1 confidence on successful
-turns — a sanity check on how solid successes look, read via the median and
-distribution. It is **not** verified accuracy: there is no ground-truth
-transcript in the logs to confirm it.
+**Confidence (secondary).** The speech engine's self-reported top-1 confidence on
+successful turns — a sanity check on how solid successes look, read via the median
+and distribution. It is **not** verified accuracy: there is no ground-truth
+transcript in the logs to confirm it. (Here, this is Azure's `NBest` confidence.)
 
 ---
 
@@ -113,29 +111,29 @@ State these limits wherever results are shown.
    was *right*. Confidence is self-reported.
 
 **Specific to this deployment (DTMF collected outside MRCP):**
-3. **DTMF folded into no-input.** Where the platform handles DTMF outside MRCP (as
-   Avaya does here), a keypad answer on a dual-input prompt leaves the parallel
-   speech request with no audio, so it ends as no-input. So no-input = DTMF +
-   genuine silence + VAD-missed speech, and a high no-input rate is not
-   automatically a defect. On a stack that recognizes DTMF *within* MRCP
-   (`dtmfrecog`), DTMF appears as its own turns instead.
+3. **DTMF folded into no-input.** Where the IVR platform handles DTMF outside MRCP,
+   a keypad answer on a dual-input prompt leaves the parallel speech request with
+   no audio, so it ends as no-input. So no-input = DTMF + genuine silence +
+   VAD-missed speech, and a high no-input rate is not automatically a defect. On a
+   stack that recognizes DTMF *within* MRCP (`dtmfrecog`), DTMF appears as its own
+   turns instead.
 
 ---
 
 ## 5. Use it on your own stack
 
-The *method* is portable; the script is a reference implementation. To reuse it,
-keep the core and replace the two adapters — expect to re-implement them, not
-just re-point the tool.
+The *method* is portable; the script is a reference implementation. Keep the core
+and replace the two adapters — expect to re-implement them, not just re-point the
+tool.
 
 **Core (unchanged):** turn = the `RECOGNITION-COMPLETE` event; outcome = its
 `Completion-Cause`; scope = the recognizer resource name.
 
 **Server adapter:** your MRCP server's log-line format and its audio-accounting
-line (UniMRCP: `Input Complete ... size=<bytes>, dur=<ms>`).
+line (UniMRCP example: `Input Complete ... size=<bytes>, dur=<ms>`).
 
-**Engine adapter:** where the transcript and confidence appear (here: Azure NLSML
-result + per-result confidence).
+**Engine adapter:** where the transcript and confidence appear (Azure example:
+NLSML result + per-result confidence).
 
 **Checklist for a new stack:**
 1. Find the recognizer's `RECOGNITION-COMPLETE` event → turn anchor.
