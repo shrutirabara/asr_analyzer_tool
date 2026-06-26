@@ -1,0 +1,21 @@
+.amazonq/
+.idea/
+
+# Local-only backups (pre-rewrite snapshots, not for the repo)
+_local_backup/
+
+# Log files (large, sensitive, environment-specific)
+logs/
+log/
+test_logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
