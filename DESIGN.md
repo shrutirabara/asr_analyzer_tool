@@ -76,16 +76,3 @@ To adapt the analyzer to another MRCP implementation, only the parsing logic mus
 
 Different MRCP servers and speech engines expose different log formats, but the recognition model itself remains unchanged.
 
----
-
-## 5. Future Work
-
-The current implementation analyzes recognition health over a single collection period.
-
-Future enhancements include:
-
-* Longitudinal trend analysis
-* Grammar-level performance reporting
-* Recognition latency metrics
-* Comparative analysis across deployments
-* Additional MRCP server and speech engine adapters
